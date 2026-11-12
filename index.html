@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1512">
+<meta name="description" content="Live leaf classifier (apple / cherry / chestnut / maple) running on-device in your browser with ONNX Runtime Web.">
+<title>Leaf classifier · on-device</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page:            #f4f4f1;
+    --surface-1:       #fcfcfb;
+    --surface-2:       #f0f0ec;
+    --border:          #e2e2dc;
+    --text-primary:    #0b0b0b;
+    --text-secondary:  #52514e;
+    --text-muted:      #7f7e76;
+    --series-1:        #2a78d6;   /* bar fill */
+    --series-1-soft:   #cde2fb;   /* bar track tint */
+    --good:            #1baf7a;
+    --bad:             #e34948;
+    --shadow:          0 1px 2px rgba(12,12,10,.06), 0 8px 24px rgba(12,12,10,.06);
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:            #121311;
+    --surface-1:       #1a1a19;
+    --surface-2:       #232322;
+    --border:          #302f2d;
+    --text-primary:    #f0efec;
+    --text-secondary:  #c3c2b7;
+    --text-muted:      #97968c;
+    --series-1:        #3987e5;
+    --series-1-soft:   #223a57;
+    --good:            #199e70;
+    --bad:             #e66767;
+    --shadow:          0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root[data-theme="auto"] {
+      color-scheme: dark;
+      --page:            #121311;
+      --surface-1:       #1a1a19;
+      --surface-2:       #232322;
+      --border:          #302f2d;
+      --text-primary:    #f0efec;
+      --text-secondary:  #c3c2b7;
+      --text-muted:      #97968c;
+      --series-1:        #3987e5;
+      --series-1-soft:   #223a57;
+      --good:            #199e70;
+      --bad:             #e66767;
+      --shadow:          0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--page);
+    color: var(--text-primary);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-text-size-adjust: 100%;
+    padding: max(12px, env(safe-area-inset-top)) 12px calc(28px + env(safe-area-inset-bottom));
+  }
+  main { max-width: 560px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+  h1 { font-size: 21px; margin: 4px 2px 0; letter-spacing: -.01em; }
+  h1 + p { margin: 2px 2px 0; color: var(--text-secondary); font-size: 13.5px; }
+  section {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 16px; box-shadow: var(--shadow); padding: 14px;
+  }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+       color: var(--text-muted); margin: 0 0 10px; font-weight: 600; }
+
+  /* ---- camera ---- */
+  .stage { position: relative; width: 100%; aspect-ratio: 1 / 1; border-radius: 12px;
+           overflow: hidden; background: #0c0d0c; }
+  .stage video, .stage canvas.still { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .stage .hint { position: absolute; inset: 0; display: grid; place-items: center;
+                 color: #cfcec6; font-size: 14px; text-align: center; padding: 24px; }
+  .stage .frame { position: absolute; inset: 0; pointer-events: none; }
+  .stage .frame::before { content: ""; position: absolute; inset: 0;
+                          box-shadow: inset 0 0 0 1px rgba(255,255,255,.35); border-radius: 12px; }
+  .stage .frame span { position: absolute; left: 10px; bottom: 8px; font-size: 11.5px;
+                       color: #efeee7; background: rgba(0,0,0,.42); padding: 3px 7px;
+                       border-radius: 999px; letter-spacing: .02em; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .row + .row { margin-top: 10px; }
+  button, .btn {
+    appearance: none; border: 1px solid var(--border); background: var(--surface-2);
+    color: var(--text-primary); font: inherit; font-size: 15px; padding: 11px 15px;
+    border-radius: 11px; cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  button.primary { background: var(--series-1); border-color: transparent; color: #fff; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: default; }
+  input[type=file] { display: none; }
+  .status { font-size: 13px; color: var(--text-secondary); min-height: 18px; margin: 10px 2px 0; }
+  .status.err { color: var(--bad); }
+  .status.ok  { color: var(--good); }
+
+  /* ---- readout ---- */
+  .hero { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; }
+  .hero b { font-size: clamp(30px, 9vw, 44px); line-height: 1.05; letter-spacing: -.02em; font-weight: 700; }
+  .hero .hp { font-size: 20px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+  .bars { display: flex; flex-direction: column; gap: 11px; }
+  .bar { display: grid; grid-template-columns: 78px 1fr 62px; align-items: center; gap: 10px; }
+  .bar .lbl { font-size: 14.5px; color: var(--text-secondary); }
+  .bar .lbl.is-top { color: var(--text-primary); font-weight: 600; }
+  .track { height: 12px; border-radius: 4px; background: var(--series-1-soft); overflow: hidden; }
+  .fill { height: 100%; width: 0%; background: var(--series-1);
+          border-radius: 0 4px 4px 0; transition: width .12s linear; }
+  .bar .val { font-size: 14px; text-align: right; color: var(--text-secondary);
+              font-variant-numeric: tabular-nums; }
+  .bar .val.is-top { color: var(--text-primary); font-weight: 600; }
+
+  /* ---- misc ---- */
+  .meta { font-size: 12.5px; color: var(--text-muted); display: grid;
+          grid-template-columns: auto 1fr; gap: 3px 12px; }
+  .meta b { color: var(--text-secondary); font-weight: 600; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  details summary { cursor: pointer; font-size: 13.5px; color: var(--text-secondary); }
+  details[open] summary { margin-bottom: 10px; }
+  #stillPreview { width: 72px; height: 72px; border-radius: 10px; object-fit: cover;
+                  border: 1px solid var(--border); display: none; }
+
+  /* ---- QR ---- */
+  .qr { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .qr svg { width: 132px; height: 132px; display: block; background: #fff;
+            padding: 8px; border-radius: 10px; border: 1px solid var(--border); flex: 0 0 auto; }
+  .qr .qr-txt { flex: 1 1 190px; min-width: 180px; }
+  .qr .qr-txt p { margin: 0 0 6px; font-size: 14px; color: var(--text-secondary); }
+  .qr a { color: var(--series-1); word-break: break-all; font-size: 14.5px; font-weight: 600; }
+  footer { text-align: center; font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <div>
+    <h1>Leaf classifier</h1>
+    <p>Runs entirely in your browser &mdash; <span id="mclasses">4</span> classes,
+       <span id="msize">96</span>&times;<span id="msize2">96</span> input, ONNX&nbsp;Runtime&nbsp;Web (WASM).</p>
+  </div>
+
+  <section>
+    <h2>Camera</h2>
+    <div class="stage">
+      <video id="video" playsinline webkit-playsinline muted autoplay></video>
+      <img id="still" class="still" alt="uploaded leaf photo">
+      <div class="hint" id="stageHint">Cover a leaf inside the square, then start the camera.</div>
+      <div class="frame"><span id="cropTag">central square &rarr; 96&times;96</span></div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button id="btnStart" class="primary">Start rear camera</button>
+      <button id="btnStop" disabled>Stop</button>
+      <button id="btnFlip" disabled>Flip camera</button>
+    </div>
+    <div class="row">
+      <label class="btn" for="fileInput">Upload photo</label>
+      <input type="file" id="fileInput" accept="image/*">
+      <label class="btn" for="camInput">Take photo (rear cam)</label>
+      <input type="file" id="camInput" accept="image/*" capture="environment">
+      <img id="stillPreview" alt="">
+    </div>
+    <p class="status" id="status">Idle.</p>
+  </section>
+
+  <section>
+    <h2>Probability per class</h2>
+    <div class="hero"><b id="topName">&ndash;</b><span class="hp" id="topProb"></span></div>
+    <div class="bars" id="bars"></div>
+    <p class="status" id="perf"></p>
+  </section>
+
+  <section>
+    <details>
+      <summary>Model &amp; preprocessing details</summary>
+      <div class="meta">
+        <span>File</span><b><code>leaf_model.onnx</code></b>
+        <span>Input</span><b><code id="inName">image</code> · <span id="inShape">1&times;3&times;96&times;96</span> · float32</b>
+        <span>Output</span><b><code id="outName">logits</code> &rarr; softmax in JS</b>
+        <span>Preprocess</span><b>central square crop &rarr; resize <span id="ppSize">96</span>&sup2; &rarr; &divide;255 &rarr; (x&minus;mean)/std &rarr; CHW</b>
+        <span>Mean</span><b id="ppMean"></b>
+        <span>Std</span><b id="ppStd"></b>
+        <span>Classes</span><b id="ppClasses"></b>
+        <span>Runtime</span><b id="ppRt">loading&hellip;</b>
+      </div>
+    </details>
+  </section>
+
+  <section>
+    <h2>Scan to open this page on your phone</h2>
+    <div class="qr">
+      <!--QR_BLOCK-->
+    </div>
+  </section>
+
+  <footer>On-device inference &mdash; no leaf image ever leaves your browser.</footer>
+</main>
+
+<script>
+"use strict";
+/* =========================================================================
+   Leaf classifier — single file, plain JS, ONNX Runtime Web from a CDN.
+   Preprocessing follows model_info.json exactly:
+     central square crop -> resize to input_size -> /255 -> (x-mean)/std -> NCHW
+   The model's graph output is raw LOGITS, so softmax is applied here.
+   ========================================================================= */
+(function () {
+  var ORT_VERSION = "1.31.1";
+  var CDNS = [
+    { base: "https://cdn.jsdelivr.net/npm/onnxruntime-web@" + ORT_VERSION + "/dist",
+      file: "ort.min.js" },
+    { base: "https://unpkg.com/onnxruntime-web@" + ORT_VERSION + "/dist",
+      file: "ort.min.js" }
+  ];
+  var MODEL_URL = "leaf_model.onnx";
+  var INFO_URL  = "model_info.json";
+
+  var $ = function (id) { return document.getElementById(id); };
+  var els = {
+    video: $("video"), still: $("still"), hint: $("stageHint"),
+    status: $("status"), perf: $("perf"), bars: $("bars"),
+    topName: $("topName"), topProb: $("topProb"),
+    btnStart: $("btnStart"), btnStop: $("btnStop"), btnFlip: $("btnFlip"),
+    fileInput: $("fileInput"), camInput: $("camInput"), preview: $("stillPreview"),
+    cropTag: $("cropTag")
+  };
+
+  var state = {
+    info: null,            // {classes, input_size, mean, std}
+    sess: null,
+    inName: "image",
+    outName: "logits",
+    stream: null,
+    facing: "environment",
+    busy: false,
+    mode: "idle",          // idle | camera | still
+    frames: 0, t0: 0, lastMs: 0,
+    lut: null,             // 3 x 256 lookup tables: byte -> normalized float
+    canvas: null, ctx: null,
+    rafId: 0, rvfcId: 0, fileURL: null
+  };
+
+  /* ------------------------------- UI helpers ------------------------------ */
+  function setStatus(msg, kind) {
+    els.status.textContent = msg;
+    els.status.className = "status" + (kind ? " " + kind : "");
+  }
+  function fmtP(p) {
+    if (p >= 0.99995) return "100.0%";
+    if (p >= 0.001) return (p * 100).toFixed(1) + "%";
+    if (p <= 0) return "0%";
+    return p.toExponential(1);           // tiny probabilities read better in sci notation
+  }
+
+  function buildBars() {
+    els.bars.innerHTML = "";
+    state.rows = state.info.classes.map(function (name) {
+      var row = document.createElement("div"); row.className = "bar";
+      var lbl = document.createElement("span"); lbl.className = "lbl"; lbl.textContent = name;
+      lbl.title = name + " — probability that this frame is a " + name + " leaf";
+      var track = document.createElement("div"); track.className = "track";
+      var fill = document.createElement("div"); fill.className = "fill"; track.appendChild(fill);
+      var val = document.createElement("span"); val.className = "val"; val.textContent = "–";
+      row.appendChild(lbl); row.appendChild(track); row.appendChild(val);
+      els.bars.appendChild(row);
+      return { name: name, fill: fill, val: val, lbl: lbl };
+    });
+    // one colour for one measure (probability): identity is carried by the row label,
+    // the rows keep the model's own fixed class order so nothing jumps around live.
+  }
+
+  function render(probs, topIdx) {
+    for (var i = 0; i < state.rows.length; i++) {
+      var r = state.rows[i], p = probs[i] || 0;
+      r.fill.style.width = (p * 100).toFixed(2) + "%";
+      r.val.textContent = fmtP(p);
+      var top = i === topIdx;
+      r.val.className = "val" + (top ? " is-top" : "");
+      r.lbl.className = "lbl" + (top ? " is-top" : "");
+    }
+    els.topName.textContent = state.info.classes[topIdx];
+    els.topProb.textContent = fmtP(probs[topIdx]);
+  }
+
+  /* ------------------------------ script loading --------------------------- */
+  function loadScript(url) {
+    return new Promise(function (resolve, reject) {
+      var s = document.createElement("script");
+      s.src = url; s.async = true;
+      s.onload = function () { resolve(); };
+      s.onerror = function () { s.remove(); reject(new Error("failed to load " + url)); };
+      document.head.appendChild(s);
+    });
+  }
+  function loadORT() {
+    var i = 0;
+    function next() {
+      if (i >= CDNS.length) return Promise.reject(new Error("could not load ONNX Runtime Web from any CDN"));
+      var c = CDNS[i++];
+      return loadScript(c.base + "/" + c.file).then(function () {
+        if (!window.ort) throw new Error("ORT global missing");
+        // GitHub Pages sends no COOP/COEP headers, so SharedArrayBuffer is unavailable:
+        // pin a single thread (also the only reliable choice in iOS Safari) and keep
+        // workers in-page rather than through a cross-origin blob proxy.
+        try {
+          window.ort.env.wasm.wasmPaths = c.base + "/";
+          window.ort.env.wasm.numThreads = 1;
+          window.ort.env.wasm.proxy = false;
+          window.ort.env.wasm.simd = true;
+        } catch (e) { /* older/newer env layout – defaults are fine */ }
+        return c;
+      }).catch(next);
+    }
+    return next();
+  }
+
+  /* ----------------------------- model + preprocess ------------------------- */
+  function buildLUT(mean, std) {
+    var lut = [];
+    for (var c = 0; c < 3; c++) {
+      var t = new Float32Array(256), m = mean[c], sd = std[c];
+      for (var v = 0; v < 256; v++) t[v] = (v / 255 - m) / sd;
+      lut.push(t);
+    }
+    return lut;
+  }
+
+  // Draws the central square of `src` into an input_size² canvas and returns an
+  // Float32Array in NCHW order, pixels scaled to 0..1 and channel-standardised.
+  function preprocess(src, srcW, srcH) {
+    var S = state.info.input_size;
+    var s = Math.min(srcW, srcH);
+    var sx = Math.round((srcW - s) / 2), sy = Math.round((srcH - s) / 2);
+    var ctx = state.ctx;
+    ctx.drawImage(src, sx, sy, s, s, 0, 0, S, S);
+    var px = ctx.getImageData(0, 0, S, S).data;      // RGBA, row-major
+    var N = S * S, out = new Float32Array(3 * N), lut = state.lut;
+    for (var i = 0, r = 0; i < N; i++, r += 4) {
+      out[i] = lut[0][px[r]];
+      out[N + i] = lut[1][px[r + 1]];
+      out[2 * N + i] = lut[2][px[r + 2]];
+    }
+    return out;
+  }
+
+  function softmax(logits) {
+    var max = -Infinity, i, sum = 0, out = new Array(logits.length);
+    for (i = 0; i < logits.length; i++) if (logits[i] > max) max = logits[i];
+    for (i = 0; i < logits.length; i++) { out[i] = Math.exp(logits[i] - max); sum += out[i]; }
+    for (i = 0; i < logits.length; i++) out[i] /= sum;
+    return out;
+  }
+
+  function argmax(a) { var b = 0; for (var i = 1; i < a.length; i++) if (a[i] > a[b]) b = i; return b; }
+
+  function runOn(src, srcW, srcH) {
+    if (!state.sess || state.busy) return Promise.resolve(null);
+    state.busy = true;
+    var t = performance.now();
+    try {
+      var input = preprocess(src, srcW, srcH);
+      var tensor = new window.ort.Tensor("float32", input, [1, 3, state.info.input_size, state.info.input_size]);
+      var feeds = {}; feeds[state.inName] = tensor;
+      return state.sess.run(feeds).then(function (res) {
+        var o = res[state.outName];
+        var probs = softmax(Array.prototype.slice.call(o.data));
+        state.lastMs = performance.now() - t;
+        reportProbs(probs);
+        if (state.mode === "camera") {
+          state.frames++;
+          var now = performance.now();
+          if (!state.t0) state.t0 = now;
+          var dt = (now - state.t0) / 1000;
+          if (dt > 1) {
+            els.perf.textContent = state.lastMs.toFixed(0) + " ms/inference · " +
+              (state.frames / dt).toFixed(1) + " inferences/s (" + (state.stream ? "live" : "photo") + ")";
+            state.frames = 0; state.t0 = now;
+          }
+        } else {
+          els.perf.textContent = state.lastMs.toFixed(0) + " ms for this photo";
+        }
+        state.busy = false;
+        return probs;
+      }).catch(function (e) {
+        state.busy = false;
+        setStatus("Inference failed: " + (e && e.message ? e.message : e), "err");
+        return null;
+      });
+    } catch (e) {
+      state.busy = false;
+      setStatus("Preprocessing failed: " + (e && e.message ? e.message : e), "err");
+      return Promise.resolve(null);
+    }
+  }
+
+  function reportProbs(probs) {
+    render(probs, argmax(probs));
+    if (window.__lastProbs) window.__lastProbs = probs;
+    window.__lastProbs = probs;
+  }
+
+  /* --------------------------------- camera -------------------------------- */
+  var hasRVFC = typeof HTMLVideoElement !== "undefined" &&
+                "requestVideoFrameCallback" in HTMLVideoElement.prototype;
+
+  function schedule() {
+    if (state.mode !== "camera") return;
+    if (hasRVFC) {
+      state.rvfcId = els.video.requestVideoFrameCallback(function () { tick(); });
+    } else {
+      state.rafId = setTimeout(function () { tick(); }, 120);
+    }
+  }
+
+  function tick() {
+    if (state.mode !== "camera") return;
+    if (!document.hidden && els.video.readyState >= 2 && els.video.videoWidth > 0 && !state.busy) {
+      runOn(els.video, els.video.videoWidth, els.video.videoHeight).then(schedule, schedule);
+    } else {
+      schedule();
+    }
+  }
+
+  function stopCamera() {
+    state.mode = "idle";
+    if (state.rvfcId && els.video.cancelVideoFrameCallback) els.video.cancelVideoFrameCallback(state.rvfcId);
+    if (state.rafId) clearTimeout(state.rafId);
+    state.rvfcId = state.rafId = 0;
+    if (state.stream) {
+      state.stream.getTracks().forEach(function (t) { t.stop(); });
+      state.stream = null;
+    }
+    els.video.srcObject = null;
+    els.btnStop.disabled = true; els.btnFlip.disabled = true;
+  }
+
+  function getMedia(constraints) {
+    var md = navigator.mediaDevices || {};
+    if (md.getUserMedia) return md.getUserMedia(constraints);
+    var legacy = navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+    if (legacy) return new Promise(function (res, rej) { legacy.call(navigator, constraints, res, rej); });
+    return Promise.reject(new Error("getUserMedia is not available in this browser"));
+  }
+
+  function startCamera() {
+    if (!window.isSecureContext) {
+      setStatus("This page needs HTTPS (or localhost) before it may use the camera. Open the deployed https:// link.", "err");
+      return;
+    }
+    stopCamera();
+    els.still.style.display = "none";
+    els.video.style.display = "block";
+    els.hint.style.display = "none";
+    els.btnStart.disabled = true;
+    setStatus("Asking for camera access…");
+
+    var attempts = [
+      { video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 1280 } }, audio: false },
+      { video: { facingMode: "environment" }, audio: false },
+      { video: true, audio: false }
+    ];
+    var i = 0;
+    function attempt() {
+      return getMedia(attempts[i]).catch(function (e) {
+        if (++i < attempts.length) return attempt();
+        throw e;
+      });
+    }
+    attempt().then(function (stream) {
+      state.stream = stream;
+      state.facing = (stream.getVideoTracks()[0].getSettings &&
+                      stream.getVideoTracks()[0].getSettings().facingMode) || state.facing;
+      els.video.srcObject = stream;
+      els.btnStop.disabled = false;
+      els.btnFlip.disabled = stream.getVideoTracks().length === 0 ? true
+        : !!(navigator.mediaDevices && navigator.mediaDevices.enumerateDevices);
+      els.btnStart.textContent = "Restart camera";
+      els.btnStart.disabled = false;
+      state.mode = "camera";
+      state.frames = 0; state.t0 = 0;
+      els.cropTag.textContent = "central square → " + state.info.input_size + "×" + state.info.input_size;
+
+      var playPromise = els.video.play();
+      if (playPromise && playPromise.catch) {
+        // iOS Safari can still refuse if the gesture chain expired; tapping again fixes it.
+        playPromise.catch(function () { setStatus("Camera is on — tap “Start rear camera” once more to let the preview play."); });
+      }
+      setStatus("Classifying the central square live.", "ok");
+      schedule();
+
+      stream.getVideoTracks()[0].addEventListener("ended", function () {
+        if (state.mode === "camera") { stopCamera(); setStatus("Camera was closed or taken by another app.", "err"); }
+      });
+    }).catch(function (e) {
+      els.btnStart.disabled = false;
+      els.hint.style.display = "grid";
+      var name = (e && e.name) || "";
+      var msg = name === "NotAllowedError" ? "Camera permission was denied. Enable it in your browser/site settings, then try again."
+              : name === "NotFoundError"   ? "No camera was found on this device."
+              : name === "NotReadableError" ? "The camera is busy in another app — close it and retry."
+              : "Could not start the camera (" + name + ": " + (e && e.message ? e.message : e) + ").";
+      setStatus(msg + " You can still use “Upload photo” below.", "err");
+    });
+  }
+
+  /* --------------------------------- photos -------------------------------- */
+  function handleFile(file) {
+    if (!file) return;
+    if (state.fileURL) { URL.revokeObjectURL(state.fileURL); state.fileURL = null; }
+    var url = URL.createObjectURL(file);
+    state.fileURL = url;
+    setStatus("Reading " + (file.name || "image") + "…");
+    var img = new Image();
+    img.onload = function () {
+      stopCamera();
+      state.mode = "still";
+      els.still.src = url;
+      els.still.style.display = "block";
+      els.video.style.display = "none";
+      els.hint.style.display = "none";
+      els.preview.src = url; els.preview.style.display = "block";
+      els.cropTag.textContent = "photo · central square → " + state.info.input_size + "×" + state.info.input_size;
+      // Keep the object URL alive: Safari unloads a blob as soon as it is revoked,
+      // which would blank the preview <img> that still points at it. The previous
+      // one is released at the top of the next handleFile() call instead.
+      runOn(img, img.naturalWidth, img.naturalHeight).then(function (p) {
+        if (p) setStatus("Classified " + (file.name || "photo") + " (" +
+                         img.naturalWidth + "×" + img.naturalHeight + ").", "ok");
+      });
+    };
+    img.onerror = function () { setStatus("That file could not be decoded as an image.", "err"); };
+    img.src = url;
+  }
+
+  /* --------------------------------- startup -------------------------------- */
+  function showModelInfo(info) {
+    $("mclasses").textContent = info.classes.length;
+    $("msize").textContent = info.input_size; $("msize2").textContent = info.input_size;
+    $("ppSize").textContent = info.input_size;
+    $("ppMean").textContent = "[" + info.mean.join(", ") + "]";
+    $("ppStd").textContent = "[" + info.std.join(", ") + "]";
+    $("ppClasses").textContent = info.classes.join(", ");
+    els.cropTag.textContent = "central square → " + info.input_size + "×" + info.input_size;
+  }
+
+  function boot() {
+    state.canvas = document.createElement("canvas");
+    state.ctx = state.canvas.getContext("2d", { willReadFrequently: true });
+
+    var infoReq = fetch(INFO_URL).then(function (r) {
+      if (!r.ok) throw new Error("model_info.json → HTTP " + r.status);
+      return r.json();
+    });
+    var ortReq = loadORT();
+    var modelReq = fetch(MODEL_URL).then(function (r) {
+      if (!r.ok) throw new Error("leaf_model.onnx → HTTP " + r.status);
+      var total = +(r.headers.get("Content-Length") || 0);
+      if (!r.body || !r.body.getReader) return r.arrayBuffer();
+      var reader = r.body.getReader(), chunks = [], got = 0;
+      function pump() {
+        return reader.read().then(function (res) {
+          if (res.done) {
+            var buf = new Uint8Array(got), off = 0;
+            chunks.forEach(function (c) { buf.set(c, off); off += c.length; });
+            return buf.buffer;
+          }
+          chunks.push(res.value); got += res.value.length;
+          if (total) setStatus("Downloading model… " + Math.round(got / total * 100) + "%");
+          return pump();
+        });
+      }
+      return pump();
+    });
+
+    return Promise.all([infoReq, ortReq, modelReq]).then(function (res) {
+      var info = res[0], cdn = res[1], buffer = res[2];
+      state.info = info;
+      state.lut = buildLUT(info.mean, info.std);
+      state.canvas.width = state.canvas.height = info.input_size;
+      state.ctx.imageSmoothingEnabled = true;
+      state.ctx.imageSmoothingQuality = "high";
+      showModelInfo(info);
+      buildBars();
+      setStatus("Model ready — start the camera or upload a photo.", "ok");
+      $("ppRt").textContent = "onnxruntime-web " + ORT_VERSION + " · wasm · 1 thread · " +
+        (window.ort.env.wasm.simd ? "simd" : "no simd") + " · " + cdn.base.split("/")[2];
+      return window.ort.InferenceSession.create(buffer, {
+        executionProviders: ["wasm"], graphOptimizationLevel: "all"
+      });
+    }).then(function (sess) {
+      state.sess = sess;
+      state.inName = (sess.inputNames && sess.inputNames[0]) || "image";
+      state.outName = (sess.outputNames && sess.outputNames[0]) || "logits";
+      $("inName").textContent = state.inName;
+      $("outName").textContent = state.outName;
+      var S = state.info.input_size;
+      $("inShape").textContent = "1×3×" + S + "×" + S;
+      setStatus("Model loaded. Press “Start rear camera” or upload a photo.", "ok");
+      document.body.dispatchEvent(new Event("leaf-ready"));
+      return sess;
+    }).catch(function (e) {
+      setStatus("Setup failed: " + (e && e.message ? e.message : e) +
+        " (needs a modern browser with WASM; check the network for the CDN/model).", "err");
+      throw e;
+    });
+  }
+
+  els.btnStart.addEventListener("click", function () { startCamera(); });
+  els.btnStop.addEventListener("click", function () {
+    stopCamera(); els.still.style.display = "none"; els.video.style.display = "none";
+    els.hint.style.display = "grid"; els.btnStart.textContent = "Start rear camera";
+    setStatus("Camera stopped.");
+  });
+  els.btnFlip.addEventListener("click", function () {
+    state.facing = state.facing === "environment" ? "user" : "environment";
+    startCamera();
+  });
+  els.fileInput.addEventListener("change", function (ev) { handleFile(ev.target.files && ev.target.files[0]); });
+  els.camInput.addEventListener("change", function (ev) { handleFile(ev.target.files && ev.target.files[0]); });
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden && state.mode === "camera") schedule();
+  });
+  els.video.addEventListener("pause", function () {
+    if (state.mode === "camera") els.video.play().catch(function () {});
+  });
+
+  /* ---- self-check: run check_image.jpg through this page's own pipeline ---- */
+  window.leafSelfTest = function () {
+    if (!state.sess) return Promise.reject(new Error("model not loaded yet"));
+    return fetch("check_expected.json").then(function (r) { return r.json(); }).then(function (expected) {
+      return new Promise(function (resolve, reject) {
+        var img = new Image();
+        img.onload = function () {
+          runOn(img, img.naturalWidth, img.naturalHeight).then(function (probs) {
+            if (!probs) return reject(new Error("inference returned nothing"));
+            var rows = state.info.classes.map(function (c, i) {
+              return { cls: c, got: probs[i], expected: expected[c], abs_diff: Math.abs(probs[i] - expected[c]) };
+            });
+            var maxDiff = rows.reduce(function (m, r2) { return Math.max(m, r2.abs_diff); }, 0);
+            var sum = probs.reduce(function (s, p) { return s + p; }, 0);
+            resolve({ ok: maxDiff < 1e-4, max_abs_diff: maxDiff, prob_sum: sum, rows: rows });
+          }, reject);
+        };
+        img.onerror = function () { reject(new Error("check_image.jpg failed to load")); };
+        img.src = "check_image.jpg";
+      });
+    });
+  };
+
+  window.__booted = boot();
+})();
+</script>
+<!--QR_INJECT-->
+</body>
+</html>
